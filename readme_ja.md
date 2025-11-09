@@ -2,7 +2,22 @@
 
 このリポジトリは、Vive Ultimate Tracker ドングルから直接ポーズを取得し、Unity シーンへ反映する最小構成の実装です。HMD なしでトラッカーの位置・回転を扱えます。
 
-主な構成
+## Unity Package Manager から Git URL で導入
+Unity のパッケージマネージャから、Git URL を指定して直接インストールできます。
+
+- Unity メニュー: Window > Package Manager
+- 右上の [+] ボタン > "Add package from git URL..."
+- 次のURLを貼り付けて Add:
+  - https://github.com/neon-izm/ViveUltimateTrackerWithoutHmdUnity.git?path=/Assets/ViveUltimateTrackerStandalone
+
+Packages/ 配下に取り込まれ、すぐにコンポーネントを利用できます。
+
+## サンプルシーン
+基本的な使い方はサンプルシーンで確認できます。`Assets/Scenes/` などにあるサンプルシーンを開いて Play してください。
+- `UltimateTrackerReceiver` がドングルへ接続し、調整済みの Unity ポーズを適用する流れが確認できます。
+- Receiver と PoseApplier の結線例として、そのままの構成をベースに自分の GameObject へ適用できます。
+
+## 主な構成
 - Runtime/Scripts/UltimateTrackerReceiver.cs
   - ドングル接続/切断、入力レポートの読み取り、ポーズ解析
   - Rawポーズを `OnTrackerPose` で通知し、Unity座標系（軸反転 + グローバルオフセット適用後）のポーズを `SimpleTrackerState.UnityPositionAdjusted/UnityRotationAdjusted` に格納
@@ -12,12 +27,12 @@
 - Runtime/Scripts/UltimateTrackerPoseApplier.cs
   - `UltimateTrackerReceiver` の更新済みポーズを Transform に適用（最小）
 
-イベント
+## イベント
 - OnTrackerPose: ドングルから受信して解析した直後のポーズを通知します（トラッカーの生データベース）。
 - OnTrackerConnected / OnTrackerDisconnected: トラッカーの接続/切断
 - OnRfStatus / OnVendorStatus / OnPairEvent / OnAck: ステータス系イベント
 
-Unity座標系への変換
+## Unity座標系への変換
 - 受信ポーズ（`SimpleTrackerState.Position/Rotation`）に対して、次を適用して Unity座標系の最終値を生成します:
   1) 軸反転: posX / yaw / roll の反転（X位置の符号、Y/Zの回転角符号）
   2) グローバルオフセット: `Matrix4x4` を左乗（`final = Offset * TRS(raw)`）
@@ -25,17 +40,17 @@ Unity座標系への変換
   - `SimpleTrackerState.UnityPosition` / `UnityRotation`（軸反転まで適用）
   - `SimpleTrackerState.UnityPositionAdjusted` / `UnityRotationAdjusted`（軸反転 + オフセット適用後）
 
-オフセット操作（全トラッカーに適用）
+## オフセット操作（全トラッカーに適用）
 - SetGlobalUnityOffset(Matrix4x4 offset)
 - SetGlobalUnityOffset(Vector3 positionOffset, Quaternion rotationOffset)
 - ClearGlobalUnityOffset() / ClearTracker()（identity に戻す）
 
-使い方（クイック）
+## 使い方（クイック）
 1) シーンに `UltimateTrackerReceiver` を配置し、Play で自動接続（`autoConnectOnStart`）
 2) `UltimateTrackerPoseApplier` を任意の Transform にアタッチ
 3) `UltimateTrackerReceiver` の `OnTrackerPose` で raw、`UnityPositionAdjusted/UnityRotationAdjusted` で最終Poseを参照
 
-注意
+## 注意
 - 軸反転はオイラー角ベースで実装されています。厳密な行列ベースが必要であれば拡張可能です。
 - 行列オフセットは 1 つのみ保持され、全トラッカーに適用されます。
 
@@ -50,6 +65,7 @@ Unity座標系への変換
 - デバイス個別ではなく単一の `Matrix4x4` グローバルオフセットを採用
 - Unity の最小 MonoBehaviour 構成（`UltimateTrackerReceiver`, `UltimateTrackerPoseApplier`）
 - 軸反転（posX/yaw/roll）とキャリブレーションフローの簡素化
+- モバイル UI/Fragment ではなく Unity シーン統合に注力
 
 改善点やプロトコル知見が得られた場合は、元の参考リポジトリにもぜひフィードバックをご検討ください。
 

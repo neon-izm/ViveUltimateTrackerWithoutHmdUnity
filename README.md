@@ -2,6 +2,21 @@
 for [日本語](readme_ja.md)
 Minimal Unity integration for reading Vive Ultimate Tracker poses directly from the USB dongle without requiring a headset. It parses raw HID reports, exposes tracker states, applies a simple coordinate conversion (X / Yaw / Roll inversion), and supports a single global transform offset.
 
+## Install via Unity Package Manager (Git URL)
+You can install this repository directly as a Unity package via Git URL:
+
+- Open Unity: Window > Package Manager
+- Click the + button > "Add package from git URL..."
+- Paste the following URL and press Add:
+  - https://github.com/neon-izm/ViveUltimateTrackerWithoutHmdUnity.git?path=/Assets/ViveUltimateTrackerStandalone
+
+Unity will fetch the package under Packages/, and you can start using the components in your project.
+
+## Sample Scene
+A minimal sample scene is included to demonstrate basic usage. Open the sample scene (for example under `Assets/Scenes/`) and press Play:
+- The scene shows how `UltimateTrackerReceiver` connects to the dongle and how the adjusted Unity pose is applied.
+- Use it as a reference template to wire the receiver and the pose applier to your own GameObjects.
+
 ## Overview
 Components:
 - `UltimateTrackerReceiver` (Runtime): Opens the dongle (VID=0x0BB4, PID=0x0350), spawns a read loop, parses incoming reports, maintains up to 5 tracker slots, emits events.
