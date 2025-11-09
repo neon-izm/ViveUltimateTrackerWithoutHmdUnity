@@ -1,0 +1,25 @@
+{
+  "name": "com.neon-izm.ultimate-tracker-standalone",
+  "version": "0.0.1",
+  "displayName": "Vive Ultimate Tracker Standalone",
+  "description": "A Unity package that enables support for Vive Ultimate Tracker in standalone applications.",
+  "dependencies": {
+    
+  },
+  "author": {
+    "name": "neon-izm",
+    "url": "https://github.com/neon-izm"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neon-izm/ViveUltimateTrackerWithoutHmdUnity"
+  },
+  "keywords": [
+    "vive",
+    "tracker"
+  ],
+  "license": "MIT License",
+  "samples": [
+    
+  ]
+}
