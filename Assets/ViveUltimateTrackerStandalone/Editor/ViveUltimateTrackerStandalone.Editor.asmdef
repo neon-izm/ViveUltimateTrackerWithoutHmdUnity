@@ -1,0 +1,16 @@
+{
+    "name": "ViveUltimateTrackerStandalone.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:4446c18a329e35546aa56f67a61cc391"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
