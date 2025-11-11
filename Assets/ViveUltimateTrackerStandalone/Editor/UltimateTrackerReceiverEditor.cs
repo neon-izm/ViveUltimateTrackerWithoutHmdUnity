@@ -15,6 +15,7 @@ namespace ViveUltimateTrackerStandalone.Editor
         private SerializedProperty _fileLoggingEnabled;
         private SerializedProperty _logFilePath;
         private SerializedProperty _appendLogFile;
+        private SerializedProperty _idMappingFilePath;
 
         private static double _nextRepaint;
         private const double LiveRefreshInterval = 0.1; // 安定したライブ更新間隔
@@ -27,28 +28,38 @@ namespace ViveUltimateTrackerStandalone.Editor
             _fileLoggingEnabled = serializedObject.FindProperty("fileLoggingEnabled");
             _logFilePath = serializedObject.FindProperty("logFilePath");
             _appendLogFile = serializedObject.FindProperty("appendLogFile");
+            _idMappingFilePath = serializedObject.FindProperty("idMappingFilePath");
             HookUpdate();
         }
+
         private void OnDisable()
         {
             UnhookUpdate();
         }
+
         private void HookUpdate()
         {
             if (_updateHooked) return;
             EditorApplication.update += OnEditorUpdate;
             _updateHooked = true;
         }
+
         private void UnhookUpdate()
         {
             if (!_updateHooked) return;
             EditorApplication.update -= OnEditorUpdate;
             _updateHooked = false;
         }
+
         private void OnEditorUpdate()
         {
             // Play中のみ一定間隔で Repaint。Inspector が非表示/破棄されたら自動解除。
-            if (target == null) { UnhookUpdate(); return; }
+            if (target == null)
+            {
+                UnhookUpdate();
+                return;
+            }
+
             if (!Application.isPlaying) return;
             double now = EditorApplication.timeSinceStartup;
             if (now >= _nextRepaint)
@@ -80,22 +91,36 @@ namespace ViveUltimateTrackerStandalone.Editor
                 MessageType.Info);
 
             serializedObject.Update();
-            EditorGUILayout.PropertyField(_autoConnectOnStart, new GUIContent(EditorLocale.T("起動時に自動接続", "Auto Connect On Start")));
+            EditorGUILayout.PropertyField(_autoConnectOnStart,
+                new GUIContent(EditorLocale.T("起動時に自動接続", "Auto Connect On Start")));
             EditorGUILayout.PropertyField(_verboseLog, new GUIContent(EditorLocale.T("詳細ログを有効化", "Verbose Logging")));
-           
+
             EditorGUILayout.Space(6);
             EditorGUILayout.LabelField(EditorLocale.T("ログ設定", "Logging"), EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(_fileLoggingEnabled, new GUIContent(EditorLocale.T("ログファイルを使う", "Use Log File")));
+            EditorGUILayout.PropertyField(_fileLoggingEnabled,
+                new GUIContent(EditorLocale.T("ログファイルを使う", "Use Log File")));
             using (new EditorGUI.DisabledScope(!_fileLoggingEnabled.boolValue))
             {
                 if (_fileLoggingEnabled.boolValue)
                 {
                     EditorGUI.indentLevel++;
-                    EditorGUILayout.PropertyField(_logFilePath, new GUIContent(EditorLocale.T("ログファイルパス", "Log File Path")));
+                    EditorGUILayout.PropertyField(_logFilePath,
+                        new GUIContent(EditorLocale.T("ログファイルパス", "Log File Path")));
                     EditorGUILayout.PropertyField(_appendLogFile, new GUIContent(EditorLocale.T("追記モード", "Append")));
                     EditorGUI.indentLevel--;
                 }
             }
+
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField(EditorLocale.T("トラッカーID管理", "Tracker ID Mapping"), EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_idMappingFilePath,
+                new GUIContent(EditorLocale.T("マッピングファイルパス", "Mapping File Path")));
+            EditorGUILayout.HelpBox(
+                EditorLocale.T(
+                    "空欄の場合、デフォルトで PersistentDataPath/tracker_id_map.json が使用されます。",
+                    "Leave empty to use default path: PersistentDataPath/tracker_id_map.json"),
+                MessageType.Info);
+
             // 末尾で Apply
             serializedObject.ApplyModifiedProperties();
 
@@ -113,16 +138,30 @@ namespace ViveUltimateTrackerStandalone.Editor
                 EditorGUILayout.BeginHorizontal();
                 if (GUILayout.Button(EditorLocale.T("接続", "Connect"), GUILayout.Height(22))) receiver.Connect();
                 if (GUILayout.Button(EditorLocale.T("切断", "Disconnect"), GUILayout.Height(22))) receiver.Disconnect();
-                if (GUILayout.Button(EditorLocale.T("ペアリング初期化", "Init Pairing"), GUILayout.Height(22))) receiver.InitPairingIfNeeded();
+                if (GUILayout.Button(EditorLocale.T("ペアリング初期化", "Init Pairing"), GUILayout.Height(22)))
+                    receiver.InitPairingIfNeeded();
                 EditorGUILayout.EndHorizontal();
-                
 
-                if (GUILayout.Button(EditorLocale.T("ドングル情報を取得 (CR_ID/ROM)", "Query Dongle Info (CR_ID/ROM)"), GUILayout.Height(22)))
+
+                if (GUILayout.Button(EditorLocale.T("ドングル情報を取得 (CR_ID/ROM)", "Query Dongle Info (CR_ID/ROM)"),
+                        GUILayout.Height(22)))
                 {
                     receiver.QueryDeviceInfoRaw();
                 }
 
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField(EditorLocale.T("ID マッピング", "ID Mapping"), EditorStyles.miniLabel);
                 EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(EditorLocale.T("保存", "Save Mapping"), GUILayout.Height(20)))
+                {
+                    receiver.SaveIdMapping();
+                }
+
+                if (GUILayout.Button(EditorLocale.T("再読込", "Reload Mapping"), GUILayout.Height(20)))
+                {
+                    receiver.LoadIdMapping();
+                }
+
                 EditorGUILayout.EndHorizontal();
             }
         }
@@ -131,29 +170,45 @@ namespace ViveUltimateTrackerStandalone.Editor
         {
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField(EditorLocale.T("Runtime ステータス", "Runtime Status"), EditorStyles.boldLabel);
-            bool isConnected = false; int reports = 0; int poses = 0;
-            try { isConnected = receiver.IsConnected; reports = receiver.ReportsParsed; poses = receiver.PosePacketsParsed; } catch { }
-            EditorGUILayout.LabelField(EditorLocale.T("接続状態", "Connection"), isConnected ? EditorLocale.T("接続中", "Connected") : EditorLocale.T("未接続", "Disconnected"));
+            bool isConnected = false;
+            int reports = 0;
+            int poses = 0;
+            try
+            {
+                isConnected = receiver.IsConnected;
+                reports = receiver.ReportsParsed;
+                poses = receiver.PosePacketsParsed;
+            }
+            catch
+            {
+            }
+
+            EditorGUILayout.LabelField(EditorLocale.T("接続状態", "Connection"),
+                isConnected ? EditorLocale.T("接続中", "Connected") : EditorLocale.T("未接続", "Disconnected"));
             EditorGUILayout.LabelField(EditorLocale.T("受信統計", "Stats"), $"Reports: {reports} / Poses: {poses}");
             if (!Application.isPlaying)
             {
-                EditorGUILayout.HelpBox(EditorLocale.T("Play モードでトラッカー情報が更新されます。", "Tracker info updates in Play mode."), MessageType.None);
+                EditorGUILayout.HelpBox(
+                    EditorLocale.T("Play モードでトラッカー情報が更新されます。", "Tracker info updates in Play mode."), MessageType.None);
                 return;
             }
-            var list = receiver.TrackerStates; if (list == null) return;
-            int trackerCount = list.Count;
-            for (int i = 0; i < trackerCount; i++)
+
+            var list = receiver.TrackerStates;
+            if (list == null) return;
+            int trackerIndex = 0;
+            foreach (var t in list)
             {
-                var t = list[i];
                 if (t == null) continue;
                 using (new EditorGUILayout.VerticalScope("box"))
                 {
-                    EditorGUILayout.LabelField($"Tracker {i}", EditorStyles.boldLabel);
+                    EditorGUILayout.LabelField($"Tracker {trackerIndex}", EditorStyles.boldLabel);
                     EditorGUILayout.LabelField(EditorLocale.T("アクティブ", "Active"), EditorLocale.YesNo(t.IsActive));
-                    EditorGUILayout.LabelField("ID", t.TrackerIdNumber.ToString());
-                    var pos = t.Position; var rotEuler = t.Rotation.eulerAngles;
+                    EditorGUILayout.LabelField("ID/Slot", t.Index.ToString());
+                    var pos = t.RawPosition;
+                    var rotEuler = t.RawRotation.eulerAngles;
                     EditorGUILayout.LabelField(EditorLocale.T("位置", "Position"), $"{pos.x:F3}, {pos.y:F3}, {pos.z:F3}");
-                    EditorGUILayout.LabelField(EditorLocale.T("回転(Euler)", "Rotation(Euler)"), $"{rotEuler.x:F1}, {rotEuler.y:F1}, {rotEuler.z:F1}");
+                    EditorGUILayout.LabelField(EditorLocale.T("回転(Euler)", "Rotation(Euler)"),
+                        $"{rotEuler.x:F1}, {rotEuler.y:F1}, {rotEuler.z:F1}");
                     EditorGUILayout.LabelField("TrackingState", t.TrackingState.ToString());
                     EditorGUILayout.LabelField("Buttons", $"0x{t.Buttons:X2}");
                     EditorGUILayout.LabelField("PacketIndex", t.PacketIndex.ToString());
@@ -162,6 +217,8 @@ namespace ViveUltimateTrackerStandalone.Editor
                     long ageMs = (long)((DateTime.UtcNow.Ticks - t.LastUpdateUtcTicks) / TimeSpan.TicksPerMillisecond);
                     EditorGUILayout.LabelField(EditorLocale.T("最終更新(ms)", "Age(ms)"), ageMs.ToString());
                 }
+
+                trackerIndex++;
             }
 
             // 取得した CR_ID 情報表示
@@ -175,6 +232,21 @@ namespace ViveUltimateTrackerStandalone.Editor
                 EditorGUILayout.LabelField("ShipSN", receiver.LastShipSerial);
                 EditorGUILayout.LabelField("CAP_FPC", receiver.LastCapFpc);
                 EditorGUILayout.LabelField("ROM", receiver.LastRomVersion);
+
+                EditorGUILayout.Space(8);
+                EditorGUILayout.LabelField(EditorLocale.T("ID マッピング情報", "ID Mapping Info"), EditorStyles.boldLabel);
+                var mappings = receiver.GetIdMappings();
+                if (mappings != null && mappings.Count > 0)
+                {
+                    foreach (var kv in mappings)
+                    {
+                        EditorGUILayout.LabelField($"MAC: {kv.Key}", $"ID: {kv.Value}");
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.LabelField(EditorLocale.T("マッピングなし", "No mappings"));
+                }
             }
         }
     }

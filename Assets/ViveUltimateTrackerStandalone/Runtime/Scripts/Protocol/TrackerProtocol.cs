@@ -50,17 +50,17 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
     /// トラッカーの状態情報
     /// </summary>
     [Serializable]
-    public class SimpleTrackerState
+    public class ViveUltimateTrackerState
     {
         public int Index;
-        public UnityEngine.Vector3 Position;
-        public UnityEngine.Quaternion Rotation;
-        public TrackerTrackingState TrackingState; // int -> enum
+        public byte[] MacAddress;
+        public UnityEngine.Vector3 RawPosition;
+        public UnityEngine.Quaternion RawRotation;
+        public TrackerTrackingState TrackingState;
         public int Buttons;
         public ushort PacketIndex;
         public long LastUpdateUtcTicks;
         public bool IsActive => (DateTime.UtcNow.Ticks - LastUpdateUtcTicks) / TimeSpan.TicksPerMillisecond < 1000;
-        public int TrackerIdNumber = -1;
         public int PoseLogCounter = 0;
         public bool HasHostMap;
         public bool HasHostEd;

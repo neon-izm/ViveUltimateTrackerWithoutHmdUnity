@@ -22,17 +22,9 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
         [Header("Target")] [SerializeField] private Transform target; // 未設定時は自分の transform
 
         // ランタイム状態
-        private readonly object _lock = new object();
-        private bool _hasPending;
-
-        private Vector3 _pendingPos;
-
-        private Quaternion _pendingRot;
         private int _pendingTrackerIndex = -1;
         private ushort _lastPacketIndex;
         private long _lastUpdateTicks;
-
-        private long _lastAppliedTicks;
 
         private void Reset()
         {
@@ -45,7 +37,7 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             if (target == null) target = transform;
             if (receiver != null)
             {
-                receiver.OnTrackerPose += OnTrackerUnityPose;
+                receiver.OnTrackerPose += OnTrackerPose; // メインスレッドイベントを購読
                 receiver.OnTrackerDisconnected += OnTrackerDisconnected;
             }
         }
@@ -54,48 +46,23 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
         {
             if (receiver != null)
             {
-                receiver.OnTrackerPose -= OnTrackerUnityPose;
+                receiver.OnTrackerPose -= OnTrackerPose;
                 receiver.OnTrackerDisconnected -= OnTrackerDisconnected;
             }
         }
 
-        private void OnTrackerUnityPose(SimpleTrackerState state)
+        private void OnTrackerPose(ViveUltimateTrackerState state)
         {
-            lock (_lock)
+            if (trackerIndex < 0 || trackerIndex == state.Index)
             {
-                if (trackerIndex < 0 || trackerIndex == state.Index)
-                {
-                    _pendingPos = state.UnityPositionAdjusted;
-                    _pendingRot = state.UnityRotationAdjusted;
-                    _pendingTrackerIndex = state.Index;
-                    _lastPacketIndex = state.PacketIndex;
-                    _lastUpdateTicks = state.LastUpdateUtcTicks;
-                    _hasPending = true;
-                }
-            }
-        }
+                // メインスレッドで直接適用
+                target.position = state.UnityPositionAdjusted;
+                target.rotation = state.UnityRotationAdjusted;
 
-        private void Update()
-        {
-            bool hasPending;
-            Vector3 pos = Vector3.zero;
-            Quaternion rot = Quaternion.identity;
-            lock (_lock)
-            {
-                hasPending = _hasPending;
-                if (hasPending)
-                {
-                    pos = _pendingPos;
-                    rot = _pendingRot;
-                    _hasPending = false;
-                }
-            }
-
-            if (hasPending)
-            {
-                target.position = pos;
-                target.rotation = rot;
-                _lastAppliedTicks = DateTime.UtcNow.Ticks;
+                // デバッグ情報更新
+                _pendingTrackerIndex = state.Index;
+                _lastPacketIndex = state.PacketIndex;
+                _lastUpdateTicks = state.LastUpdateUtcTicks;
             }
         }
 
