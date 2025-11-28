@@ -1,6 +1,6 @@
 {
   "name": "com.neon-izm.ultimate-tracker-standalone",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "displayName": "Vive Ultimate Tracker Standalone",
   "description": "A Unity package that enables support for Vive Ultimate Tracker in standalone applications.",
   "dependencies": {
