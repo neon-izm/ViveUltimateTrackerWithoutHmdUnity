@@ -286,12 +286,13 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             st.UnityPosition = p;
             st.UnityRotation = r;
 
-            var rawMat = Matrix4x4.TRS(p, r, Vector3.one);
-            var finalMat = _unityOffset * rawMat;
-
-            var finalPos = finalMat.GetColumn(3);
-            var finalRot = Quaternion.LookRotation(finalMat.GetColumn(2), finalMat.GetColumn(1));
-            finalRot = Quaternion.Normalize(finalRot);
+            // オフセット行列を適用して最終的な位置と回転を計算
+            var finalPos = _unityOffset.MultiplyPoint3x4(p);
+            var offsetRotation = Quaternion.LookRotation(
+                _unityOffset.GetColumn(2), 
+                _unityOffset.GetColumn(1)
+            );
+            var finalRot = Quaternion.Normalize(offsetRotation * r* Quaternion.Euler(90, 0, 0)); // トラッカーの前方が Unity の上向きなので補正
 
             st.UnityPositionAdjusted = finalPos;
             st.UnityRotationAdjusted = finalRot;
