@@ -1,5 +1,5 @@
-
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,7 +23,8 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
         public const int ProductId = TrackerProtocol.ProductId;
 
         // Public events
-        public event Action<SimpleTrackerState> OnTrackerPose; // 追加: RawPose (従来OnTrackerPoseと同等)
+        public event Action<ViveUltimateTrackerState> OnTrackerPose; // メインスレッドで発火
+        public event Action<ViveUltimateTrackerState> OnTrackerRawPose; // 生データ（別スレッド）
         public event Action<int> OnTrackerConnected; // tracker index
         public event Action<int> OnTrackerDisconnected; // tracker index
         public event Action<RfStatusInfo> OnRfStatus;
@@ -32,19 +33,18 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
         public event Action<AckInfo> OnAck;
 
         // States
-        private readonly SimpleTrackerState[] _trackers = new SimpleTrackerState[5];
+        private readonly Dictionary<string, ViveUltimateTrackerState> _trackersByMac =
+            new Dictionary<string, ViveUltimateTrackerState>();
 
-        private readonly byte[][] _macAddresses = new byte[5][]; // 6-byte MAC
+        private readonly ConcurrentQueue<ViveUltimateTrackerState> _mainThreadPoseQueue =
+            new ConcurrentQueue<ViveUltimateTrackerState>();
 
-        // トラッカーID(TrackerIdNumber) ごとのオフセット (Position + Rotation)
-        // private readonly System.Collections.Generic.Dictionary<int, (Vector3 posOffset, Quaternion rotOffset)> _unityOffsets = new System.Collections.Generic.Dictionary<int, (Vector3, Quaternion)>();
-        // 単一グローバルオフセット（全トラッカーに適用）
         private Matrix4x4 _unityOffset = Matrix4x4.identity;
 
-        // 新規分割: HID/Logger/Parser
         private DongleHidClient _hidClient;
         private TrackerReportParser _parser;
         private TrackerLogger _logger;
+        private TrackerIdMapper _idMapper;
 
         private CancellationTokenSource _cts;
         private Task _readTask;
@@ -61,27 +61,35 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
         [SerializeField] private string logFilePath = "log.txt";
         [SerializeField] private bool appendLogFile = true;
 
+        [Header("Tracker ID Mapping")]
+        [SerializeField] private string idMappingFilePath = "";
 
         private bool _dongleInitialized = false; // pairing初期化フラグ
 
         private void Awake()
         {
-            for (int i = 0; i < _trackers.Length; i++) _trackers[i] = new SimpleTrackerState { Index = i };
             _logger = new TrackerLogger(verboseLog, fileLoggingEnabled, logFilePath, appendLogFile);
+
+            string mappingPath = GetIdMappingFilePath();
+            _idMapper = new TrackerIdMapper(mappingPath, _logger);
+            _idMapper.Load();
+
             _hidClient = new DongleHidClient();
-            _parser = new TrackerReportParser(_trackers, _macAddresses, _logger,
+            _parser = new TrackerReportParser(_trackersByMac, _logger,
                 idx => OnTrackerConnected?.Invoke(idx),
                 idx => OnTrackerDisconnected?.Invoke(idx),
                 st =>
                 {
-                    ApplyUnityOffsetAndEmit(st);
-                    OnTrackerPose?.Invoke(st);
+                    OnTrackerRawPose?.Invoke(st);
+                    ApplyUnityOffsetAndEnqueue(st);
                 }
                 ,
                 rf => OnRfStatus?.Invoke(rf),
                 vend => OnVendorStatus?.Invoke(vend),
                 pair => OnPairEvent?.Invoke(pair),
                 ack => OnAck?.Invoke(ack));
+
+            _parser.SetIdMapper(_idMapper);
         }
 
         private void Start()
@@ -89,19 +97,31 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             if (autoConnectOnStart) Connect();
         }
 
+        private void Update()
+        {
+            while (_mainThreadPoseQueue.TryDequeue(out var state))
+            {
+                OnTrackerPose?.Invoke(state);
+            }
+        }
+
         private void OnDestroy()
         {
             Disconnect();
+            _idMapper.Save();
+
             _logger?.Dispose();
             HidSharp.Utility.HidSharpLibrary.ManualShutdown();
         }
 
 
         public bool IsConnected => _connected;
-        public IReadOnlyList<SimpleTrackerState> TrackerStates => _trackers;
+        public IReadOnlyCollection<ViveUltimateTrackerState> TrackerStates => _trackersByMac.Values;
 
-        public IReadOnlyDictionary<int, (Vector3 posOffset, Quaternion rotOffset)> UnityOffsets =>
-            null; // 廃止: 互換性目的で null
+        public int ConnectedTrackerCount => _trackersByMac.Count;
+
+        [Obsolete("UnityOffsets is deprecated. Use GlobalUnityOffsetMatrix instead.")]
+        public IReadOnlyDictionary<int, (Vector3 posOffset, Quaternion rotOffset)> UnityOffsets => null;
 
         public Vector3 GlobalUnityPositionOffset => _unityOffset.GetColumn(3);
 
@@ -154,14 +174,13 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
                 }
 
                 _logger.Info("Dongle disconnected.");
-                for (int i = 0; i < _trackers.Length; i++)
+                
+                foreach (var kv in _trackersByMac)
                 {
-                    if (_macAddresses[i] != null)
-                    {
-                        _macAddresses[i] = null;
-                        OnTrackerDisconnected?.Invoke(i);
-                    }
+                    OnTrackerDisconnected?.Invoke(kv.Value.Index);
                 }
+
+                _trackersByMac.Clear();
             }
             catch (Exception ex)
             {
@@ -201,8 +220,8 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             if (_dongleInitialized) return;
             try
             {
-                var payload = new List<byte> { 0x00, 1, 1, 1, 1, 0, 0 }; // RF_BEHAVIOR_PAIR_DEVICE
-                _hidClient.SendFeature(0x1D, payload); // DCMD_REQUEST_RF_CHANGE_BEHAVIOR
+                var payload = new List<byte> { 0x00, 1, 1, 1, 1, 0, 0 };
+                _hidClient.SendFeature(0x1D, payload);
                 _logger.Info("Sent pairing behavior (DCMD 0x1D)");
             }
             catch (Exception ex)
@@ -245,24 +264,13 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             }
         }
 
-        private void ApplyUnityOffsetAndEmit(SimpleTrackerState st)
+        private void ApplyUnityOffsetAndEnqueue(ViveUltimateTrackerState st)
         {
-            // 変換パイプライン:
-            // 1) Parser が設定した UnityPosition / UnityRotation (半生データ) を取得
-            // 2) 軸反転 (要求: posX, yaw, roll) を適用
-            // 3) 行列オフセット (_unityOffset) を合成 (final = _unityOffset * raw)
-            // 4) 調整後の値を SimpleTrackerState.UnityPositionAdjusted / UnityRotationAdjusted に反映
-            // 5) OnTrackerUnityPose を発火
+            var p = st.RawPosition;
+            var r = st.RawRotation;
 
-            // 基本姿勢取得
-            var p = st.Position;
-            var r = st.Rotation;
-
-            // ---- 軸反転処理 ----
-            // 位置 X 反転
             p.x = -p.x;
 
-            // 回転 (Yaw, Roll) 反転: Euler 角で符号反転後 Quaternion 再構築
             if (true)
             {
                 var e = r.eulerAngles;
@@ -273,25 +281,22 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
                 r = Quaternion.Euler(e);
             }
 
-            // Quaternion 正規化 (念のため誤差蓄積防止)
             r = Quaternion.Normalize(r);
 
             st.UnityPosition = p;
             st.UnityRotation = r;
-            // ---- グローバルオフセット行列適用 ----
-            // オフセットは raw → offset * raw の順で左乗
+
             var rawMat = Matrix4x4.TRS(p, r, Vector3.one);
             var finalMat = _unityOffset * rawMat;
 
-            // 行列から最終 position / rotation を抽出
             var finalPos = finalMat.GetColumn(3);
-            // LookRotation( forward=z列, up=y列 )
             var finalRot = Quaternion.LookRotation(finalMat.GetColumn(2), finalMat.GetColumn(1));
             finalRot = Quaternion.Normalize(finalRot);
 
-            // 状態へ反映
             st.UnityPositionAdjusted = finalPos;
             st.UnityRotationAdjusted = finalRot;
+
+            _mainThreadPoseQueue.Enqueue(st);
         }
 
         /// <summary>
@@ -322,14 +327,44 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts
             _logger.Info("Cleared global Unity offset (identity)");
         }
 
-        private SimpleTrackerState FindByTrackerId(int trackerId)
+
+
+        /// <summary>
+        /// IDマッピングファイルのパスを取得。
+        /// </summary>
+        private string GetIdMappingFilePath()
         {
-            for (int i = 0; i < _trackers.Length; i++)
+            if (!string.IsNullOrEmpty(idMappingFilePath))
             {
-                if (_trackers[i].TrackerIdNumber == trackerId) return _trackers[i];
+                return idMappingFilePath;
             }
 
-            return null;
+            // デフォルトパス: Application.persistentDataPath + "/tracker_id_map.json"
+            // StreamingAssetsがあればそちらを使う
+            string streamingAssetsPath = System.IO.Path.Combine(Application.streamingAssetsPath, "tracker_id_map.json");
+            if (System.IO.File.Exists(streamingAssetsPath))
+            {
+                return streamingAssetsPath;
+            }
+
+            return System.IO.Path.Combine(Application.persistentDataPath, "tracker_id_map.json");
+        }
+
+        public void SaveIdMapping()
+        {
+            _idMapper.Save();
+            _logger?.Info("Manually saved tracker ID mapping.");
+        }
+
+        public void LoadIdMapping()
+        {
+            _idMapper.Load();
+            _logger?.Info("Manually loaded tracker ID mapping.");
+        }
+
+        public IReadOnlyDictionary<string, int> GetIdMappings()
+        {
+            return _idMapper?.GetMappings() ?? new Dictionary<string, int>();
         }
     }
 }

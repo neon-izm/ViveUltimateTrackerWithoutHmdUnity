@@ -13,32 +13,34 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
     /// </summary>
     public class TrackerReportParser
     {
-        private readonly SimpleTrackerState[] _trackers;
-        private readonly byte[][] _macs;
+        private readonly Dictionary<string, ViveUltimateTrackerState> _trackers;
         private readonly TrackerLogger _log;
         private readonly Action<int> _onConnect;
         private readonly Action<int> _onDisconnect;
-        private readonly Action<SimpleTrackerState> _onPose;
+        private readonly Action<ViveUltimateTrackerState> _onPose;
         private readonly Action<RfStatusInfo> _onRf;
         private readonly Action<VendorStatusInfo> _onVendor;
         private readonly Action<PairEventInfo> _onPair;
         private readonly Action<AckInfo> _onAck;
 
+
         private bool _verbose => _log?.Verbose == true;
         private int _poseLogInterval = 500;
         private int _currentHostTrackerId = -1;
         private string _wifiCountry = "US";
+        
+        // TrackerIdMapper
+        private TrackerIdMapper _idMapper;
 
         public int ReportsParsed { get; private set; }
         public int PosePacketsParsed { get; private set; }
 
-        public TrackerReportParser(SimpleTrackerState[] trackers, byte[][] macs, TrackerLogger log,
+        public TrackerReportParser(Dictionary<string, ViveUltimateTrackerState> trackers, TrackerLogger log,
             Action<int> onConnect, Action<int> onDisconnect,
-            Action<SimpleTrackerState> onPose, Action<RfStatusInfo> onRf,
+            Action<ViveUltimateTrackerState> onPose, Action<RfStatusInfo> onRf,
             Action<VendorStatusInfo> onVendor, Action<PairEventInfo> onPair, Action<AckInfo> onAck)
         {
             _trackers = trackers;
-            _macs = macs;
             _log = log;
             _onConnect = onConnect;
             _onDisconnect = onDisconnect;
@@ -47,6 +49,14 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
             _onVendor = onVendor;
             _onPair = onPair;
             _onAck = onAck;
+        }
+
+        /// <summary>
+        /// TrackerIdMapperを設定する。
+        /// </summary>
+        public void SetIdMapper(TrackerIdMapper idMapper)
+        {
+            _idMapper = idMapper;
         }
 
         public void ParseReport(byte[] buf, int len, Func<byte, IReadOnlyList<byte>, byte[]> sendFeature)
@@ -187,6 +197,13 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
             return;
         }
 
+        private static string ToMacKey(byte[] mac)
+        {
+            if (mac == null || mac.Length < 6) return string.Empty;
+            // 先頭1バイトは不安定のため無視し、残り5バイトをキーにする
+            return string.Join(":", mac.Skip(1).Select(x => x.ToString("X2")));
+        }
+
         /// <summary>
         /// 最も重要な部分、ポーズパケットの解釈
         /// </summary>
@@ -198,8 +215,11 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
         private void ParsePose(byte[] deviceAddr, byte[] src, int start, int length, ushort pktIdx)
         {
             if (length < 37) return;
-            int trackerIndex = GetOrAssignTrackerIndex(deviceAddr);
-            if (trackerIndex < 0) return;
+            var macKey = ToMacKey(deviceAddr);
+            
+            var state = GetOrCreateTrackerState(macKey, deviceAddr);
+            if (state == null) return;
+            
             int o = start;
             byte btns = src[o + 1];
             float px = BitConverter.ToSingle(src, o + 2);
@@ -211,32 +231,20 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
             float rw = ParseHelper.HalfToSingle(TrackerProtocol.ReadUInt16Le(src, o + 20));
             int trackingState = src[o + 36] & 0xFF;
 
-            var state = _trackers[trackerIndex];
-            state.Position = new Vector3(px, py, pz);
-            state.Rotation = new Quaternion(rx, ry, rz, rw);
-
-            state.TrackingState = (TrackerTrackingState)trackingState; // enum 化対応
+            state.RawPosition = new Vector3(px, py, pz);
+            state.RawRotation = new Quaternion(rx, ry, rz, rw);
+            state.TrackingState = (TrackerTrackingState)trackingState;
             state.Buttons = btns;
             state.PacketIndex = pktIdx;
             state.LastUpdateUtcTicks = DateTime.UtcNow.Ticks;
             state.PoseLogCounter++;
 
-            // フォールバックID: PairEvent / ACK で未確定ならスロット番号を暫定IDにする
-            if (state.TrackerIdNumber < 0)
-            {
-                state.TrackerIdNumber = trackerIndex;
-                if (_verbose)
-                    _log.Info(
-                        $"Fallback assign tracker ID={trackerIndex} for slot={trackerIndex} MAC={TrackerProtocol.MacToString(deviceAddr)} (no pair event yet)");
-            }
 
             PosePacketsParsed++;
             if (_verbose && _poseLogInterval > 0 && (state.PoseLogCounter % _poseLogInterval == 0))
             {
-                _log.Info(
-                    $"PoseLog[{trackerIndex}] count={state.PoseLogCounter} pkt={pktIdx} pos=({px:F3},{py:F3},{pz:F3}) rot=({rx:F3},{ry:F3},{rz:F3},{rw:F3}) track={trackingState} btn=0x{btns:X2}");
+                _log.Info($"PoseLog[{state.Index}] count={state.PoseLogCounter} pkt={pktIdx} pos=({px:F3},{py:F3},{pz:F3}) rot=({rx:F3},{ry:F3},{rz:F3},{rw:F3}) track={trackingState} btn=0x{btns:X2}");
             }
-
             _onPose?.Invoke(state);
         }
 
@@ -249,119 +257,80 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
         private void HandlePairEvent(byte[] payload, Func<byte, IReadOnlyList<byte>, byte[]> sendFeature)
         {
             if (payload.Length < 8) return;
-            // ログから payloadHead=01 01 23 ... となっており先頭の 01 は不明フラグ、2番目 01 が is_unpair と推測
-            // しかし現在の実装では payload[1] を isUnpair と扱い tracker が即 unpair されている。解除を防ぐため0番目を unpair に再評価。
-            int isUnpairCandidate0 = payload[0] & 0xFF;
-            int isUnpairCandidate1 = payload[1] & 0xFF;
-            bool treatAsUnpair = isUnpairCandidate0 > 0 && isUnpairCandidate1 == 0; // 仮ロジック: 先頭が非ゼロかつ次が0なら解除
-            // 実際の解除条件が不明なため、当面解除を抑止: 常に false
-            treatAsUnpair = false;
+            int slot = payload[0] & 0xFF;
+            byte[] mac = new byte[6];
+            Array.Copy(payload, 1, mac, 0, 6);
+            int trackerId = payload[7] & 0xFF;
+            bool isHost = (payload.Length > 8) && ((payload[8] & 0x01) != 0);
+            bool isNewAssignment = (payload.Length > 8) && ((payload[8] & 0x02) != 0);
+            bool isUnpair = (payload.Length > 8) && ((payload[8] & 0x04) != 0);
+            var macKey = ToMacKey(mac);
+            var macString = TrackerProtocol.MacToString(mac);
 
-            byte[] mac = new byte[Math.Max(0, payload.Length - 2)];
-            Array.Copy(payload, 2, mac, 0, mac.Length);
-            int slot = FindTrackerIndexByMac(mac);
-            bool isNewAssignment = false;
-            if (slot < 0)
+
+            if (isUnpair)
             {
-                slot = GetOrAssignTrackerIndex(mac);
-                isNewAssignment = true;
-            }
-
-            int trackerNumericId = ExtractIdFromMac(mac, slot);
-            if (slot >= 0) _trackers[slot].TrackerIdNumber = trackerNumericId;
-
-            if (treatAsUnpair)
-            {
-                if (slot >= 0)
+                if (_trackers.TryGetValue(macKey, out var existing))
                 {
-                    _macs[slot] = null;
-                    _onDisconnect?.Invoke(slot);
-                    if (_currentHostTrackerId == trackerNumericId) _currentHostTrackerId = -1;
-                    _log.Info(
-                        $"(Suppressed) Tracker {trackerNumericId} unpaired MAC={TrackerProtocol.MacToString(mac)}");
-                    _onPair?.Invoke(new PairEventInfo
-                        { Mac = mac, IsUnpair = true, Slot = slot, TrackerId = trackerNumericId, IsHost = false });
+                    _trackers.Remove(macKey);
+                    _onDisconnect?.Invoke(existing.Index);
                 }
-
-                return;
-            }
-
-            // ACK 初期設定
-            AckSetRoleId(sendFeature, mac, 1);
-            AckSetTrackingMode(sendFeature, mac, -1);
-            bool becameHost = false;
-            if (_currentHostTrackerId == -1 || IsHost(mac))
-            {
-                _currentHostTrackerId = trackerNumericId;
-                becameHost = true;
-                AckSetWifiCountry(sendFeature, mac);
-                AckSetNewId(sendFeature, mac, trackerNumericId);
-                AckSetFW(sendFeature, mac, 2);
-                AckSetTrackingMode(sendFeature, mac, TrackerProtocol.TRACKING_MODE_SLAM_HOST);
+                _log.Info($"PairEvent: Unpair ID/Slot={slot} MAC={macString}");
             }
             else
             {
-                AckSetTrackingHost(sendFeature, mac, _currentHostTrackerId);
-                AckSetWifiHost(sendFeature, mac, _currentHostTrackerId);
-                AckSetNewId(sendFeature, mac, trackerNumericId);
-                AckSetFW(sendFeature, mac, 2);
-                AckSetTrackingMode(sendFeature, mac, TrackerProtocol.TRACKING_MODE_SLAM_CLIENT);
-                AckEndMap(sendFeature, mac);
+                int id = _idMapper.GetOrAssignId(macKey, autoSave: true);
+                
+                if (!_trackers.TryGetValue(macKey, out var state))
+                {
+                    state = new ViveUltimateTrackerState 
+                    { 
+                        Index = id,
+                        MacAddress = mac
+                    };
+                    _trackers[macKey] = state;
+                    _onConnect?.Invoke(id);
+                }
+                else
+                {
+                    if (state.Index != id)
+                    {
+                        state.Index = id;
+                        _onConnect?.Invoke(id);
+                    }
+                }
+                
+                state.HasHostMap = isHost;
+                _log.Info($"PairEvent: MAC={macString} ID/Slot={id} isHost={isHost} newAssign={isNewAssignment}");
             }
 
-            _log.Info(
-                $"PairEvent processed: mac={TrackerProtocol.MacToString(mac)} slot={slot} newId={trackerNumericId} host={_currentHostTrackerId} rawFirst2={payload[0]:X2},{payload[1]:X2}");
-            _onPair?.Invoke(new PairEventInfo
+            var pairInfo = new PairEventInfo
             {
-                Mac = mac, IsUnpair = false, Slot = slot, TrackerId = trackerNumericId, IsHost = becameHost,
+                Mac = mac, IsUnpair = isUnpair, Slot = slot, TrackerId = trackerId, IsHost = isHost,
                 IsNewAssignment = isNewAssignment
-            });
+            };
+            _onPair?.Invoke(pairInfo);
         }
 
-        private int ExtractIdFromMac(byte[] mac, int fallbackSlot)
-        {
-            if (mac == null || mac.Length < 2) return fallbackSlot;
-            byte b = mac[1];
-            // 期待: '0'～'9' の ASCII
-            if (b >= (byte)'0' && b <= (byte)'9') return b - (byte)'0';
-            // 期待: 16進 ASCII の可能性 -> 1桁のみ扱う
-            if (b >= (byte)'A' && b <= (byte)'F') return 10 + (b - (byte)'A');
-            if (b >= (byte)'a' && b <= (byte)'f') return 10 + (b - (byte)'a');
-            // それ以外はスロット番号を採用
-            return fallbackSlot;
-        }
 
-        // 追補: ホスト判定とステータス更新ヘルパ
-        private bool IsHost(byte[] mac)
-        {
-            int idx = FindTrackerIndexByMac(mac);
-            if (idx < 0) return false;
-            var state = _trackers[idx];
-            return state.TrackerIdNumber >= 0 && state.TrackerIdNumber == _currentHostTrackerId;
-        }
 
-        private void UpdateTrackerStatusFromAck(byte[] mac, int keyId, int state)
+        private void UpdateTrackerStatusFromAck(byte[] mac, int keyId, int stateVal)
         {
-            int idx = FindTrackerIndexByMac(mac);
-            if (idx < 0) return;
-            var t = _trackers[idx];
+            var st = FindState(mac);
+            if (st == null) return;
             switch (keyId)
             {
-                case 3: t.HasHostMap = state > 0; break;
-                case 2: t.HasHostEd = state > 0; break;
-                case 5: t.MapState = state; break;
-                case 6:
-                    t.PoseStatusCode = state;
-                    t.PoseStatus = PoseStatusToString(state);
-                    break;
+                case 3: st.HasHostMap = stateVal > 0; break;
+                case 2: st.HasHostEd = stateVal > 0; break;
+                case 5: st.MapState = stateVal; break;
+                case 6: st.PoseStatusCode = stateVal; st.PoseStatus = PoseStatusToString(stateVal); break;
             }
         }
 
         private void UpdateTrackerMapState(byte[] mac, int mapState)
         {
-            int idx = FindTrackerIndexByMac(mac);
-            if (idx < 0) return;
-            _trackers[idx].MapState = mapState;
+            var st = FindState(mac);
+            if (st != null) st.MapState = mapState;
         }
 
         private string PoseStatusToString(int code)
@@ -470,17 +439,15 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
 
         private void TryUpdateIdFromAck(byte[] mac, string ascii)
         {
-            if (mac == null) return;
-            int idx = FindTrackerIndexByMac(mac);
-            if (idx < 0) return;
+            var st = FindState(mac);
+            if (st == null) return;
             string sUpper = ascii.ToUpperInvariant();
             string tailDigits = ExtractTrailingDigits(sUpper);
             if (tailDigits != null && int.TryParse(tailDigits, out int id))
             {
                 if (id >= 0 && id < 64)
                 {
-                    _trackers[idx].TrackerIdNumber = id;
-                    if (_verbose) _log.Info($"Updated tracker slot {idx} ID={id} from ACK '{ascii}'");
+                    if (_verbose) _log.Info($"ACK received for tracker ID/Slot={st.Index} (from ACK: ID={id}, ASCII='{ascii}')");
                 }
             }
         }
@@ -572,37 +539,40 @@ namespace ViveUltimateTrackerStandalone.Runtime.Scripts.Protocol
         private void AckSetFW(Func<byte, IReadOnlyList<byte>, byte[]> sendFeature, byte[] mac, int fw) =>
             SendAckTo(sendFeature, mac, $"{TrackerProtocol.ACK_FW}{fw}");
 
-        // スロット割り当て
-        private int FindTrackerIndexByMac(byte[] mac)
+        // スロット・ID管理（TrackerIdMapperに委譲）
+        private ViveUltimateTrackerState FindState(byte[] mac)
         {
-            for (int i = 0; i < _macs.Length; i++)
-            {
-                var m = _macs[i];
-                if (m != null && TrackerProtocol.MacEquals(m, mac)) return i;
-            }
-
-            return -1;
+            var key = ToMacKey(mac);
+            if (string.IsNullOrEmpty(key)) return null;
+            _trackers.TryGetValue(key, out var st);
+            return st;
         }
 
-        private int GetOrAssignTrackerIndex(byte[] mac)
+        /// <summary>
+        /// トラッカー状態を取得または新規作成。
+        /// </summary>
+        private ViveUltimateTrackerState GetOrCreateTrackerState(string macKey, byte[] macBytes)
         {
-            int existing = FindTrackerIndexByMac(mac);
-            if (existing >= 0) return existing;
-            for (int i = 0; i < _macs.Length; i++)
+            if (_trackers.TryGetValue(macKey, out var existing))
+                return existing;
+
+            int id = _idMapper.GetOrAssignId(macKey, autoSave: true);
+            if (id < 0)
             {
-                if (_macs[i] == null)
-                {
-                    _macs[i] = mac.ToArray();
-                    _trackers[i].PoseLogCounter = 0;
-                    _onConnect?.Invoke(i);
-                    _log.Info($"Tracker slot {i} assigned MAC {TrackerProtocol.MacToString(mac)}");
-                    return i;
-                }
+                return null;
             }
 
-            return -1;
+            var state = new ViveUltimateTrackerState
+            {
+                Index = id,
+                MacAddress = macBytes
+            };
+
+            _trackers[macKey] = state;
+            _onConnect?.Invoke(id);
+            _log.Info($"Tracker assigned: MAC={TrackerProtocol.MacToString(macBytes)} ID/Slot={id}");
+            return state;
         }
-        
     }
 }
 
